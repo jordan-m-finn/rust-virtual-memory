@@ -57,11 +57,60 @@ impl TranslationResult {
     }
 }
 
-/// Translate a virtual address to a physical address
-pub fn translate(_va: &VirtualAddress, _pm: &[i32]) -> TranslationResult {
-    // TODO:- implement basic translation
-    // TODO: - extend for demand paging
-    todo!("Implement address translation")
+/// Translate a virtual address to a physical address (without demand paging)
+/// # Note
+/// This version does NOT handle demand paging. All PT and page entries
+/// must be positive (resident in memory). See `translate_with_demand_paging`
+/// for the extended version.
+pub fn translate(va: &VirtualAddress, pm: &crate::memory::PhysicalMemory) -> TranslationResult {
+    // Step 1: Get segment table entry
+    let segment_size = pm.get_segment_size(va.s);
+    let pt_location = pm.get_segment_pt_location(va.s);
+
+    // Step 2: Check if segment exists
+    // If both size and pt_location are 0, segment doesn't exist
+    if segment_size == 0 && pt_location == 0 {
+        return TranslationResult::InvalidSegment;
+    }
+
+    // Step 3: Check segment boundary
+    // pw is the offset within the segment, must be less than segment size
+    if va.pw >= segment_size as u32 {
+        return TranslationResult::SegmentBoundaryViolation;
+    }
+
+    // Step 4: Look up page table entry
+    // For basic translation, pt_location must be positive (resident)
+    if pt_location <= 0 {
+        // In basic mode, negative means not resident - treat as invalid
+        // (Demand paging would handle this differently)
+        return TranslationResult::InvalidSegment;
+    }
+
+    let page_frame = pm.get_page_frame(pt_location, va.p);
+
+    // Step 5: Check if page exists
+    if page_frame <= 0 {
+        // Page frame of 0 means page doesn't exist
+        // Negative would mean on disk (demand paging)
+        return TranslationResult::InvalidPage;
+    }
+
+    // Step 6: Calculate physical address
+    // PA = page_frame * PAGE_SIZE + w
+    let pa = page_frame * PAGE_SIZE as i32 + va.w as i32;
+
+    TranslationResult::Success(pa)
+}
+
+/// Translate a batch of virtual addresses
+pub fn translate_batch(vas: &[u32], pm: &crate::memory::PhysicalMemory) -> Vec<i32> {
+    vas.iter()
+        .map(|&va| {
+            let va = VirtualAddress::from_raw(va);
+            translate(&va, pm).to_output()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -233,5 +282,202 @@ mod tests {
         assert_eq!(TranslationResult::SegmentBoundaryViolation.to_output(), -1);
         assert_eq!(TranslationResult::InvalidSegment.to_output(), -1);
         assert_eq!(TranslationResult::InvalidPage.to_output(), -1);
+    }
+
+    // =========================================================================
+    // Translation tests - Simple test case from spec
+    // =========================================================================
+
+    fn setup_simple_test_memory() -> crate::memory::PhysicalMemory {
+        // From spec: init file contains:
+        // Line 1: 6 3000 4
+        // Line 2: 6 5 9
+        let mut pm = crate::memory::PhysicalMemory::new();
+
+        // Segment 6: size=3000, PT in frame 4
+        pm.set_segment_entry(6, 3000, 4);
+
+        // Page 5 of segment 6 is in frame 9
+        pm.set_page_entry(4, 5, 9);
+
+        pm
+    }
+
+    #[test]
+    fn test_translate_simple_case_1() {
+        // VA = 1575424, expected PA = 4608
+        let pm = setup_simple_test_memory();
+        let va = VirtualAddress::from_raw(1575424);
+
+        // Verify decomposition: s=6, p=5, w=0, pw=2560
+        assert_eq!(va.s, 6);
+        assert_eq!(va.p, 5);
+        assert_eq!(va.w, 0);
+        assert_eq!(va.pw, 2560);
+
+        let result = translate(&va, &pm);
+
+        // PA = frame_9 * 512 + 0 = 4608
+        assert_eq!(result, TranslationResult::Success(4608));
+        assert_eq!(result.to_output(), 4608);
+    }
+
+    #[test]
+    fn test_translate_simple_case_2() {
+        // VA = 1575863, expected PA = 5047
+        let pm = setup_simple_test_memory();
+        let va = VirtualAddress::from_raw(1575863);
+
+        // Verify decomposition: s=6, p=5, w=439, pw=2999
+        assert_eq!(va.s, 6);
+        assert_eq!(va.p, 5);
+        assert_eq!(va.w, 439);
+        assert_eq!(va.pw, 2999); // Just under 3000
+
+        let result = translate(&va, &pm);
+
+        // PA = frame_9 * 512 + 439 = 4608 + 439 = 5047
+        assert_eq!(result, TranslationResult::Success(5047));
+        assert_eq!(result.to_output(), 5047);
+    }
+
+    #[test]
+    fn test_translate_simple_case_3_boundary_violation() {
+        // VA = 1575864, expected output = -1 (error)
+        let pm = setup_simple_test_memory();
+        let va = VirtualAddress::from_raw(1575864);
+
+        // Verify decomposition: s=6, p=5, w=440, pw=3000
+        assert_eq!(va.s, 6);
+        assert_eq!(va.p, 5);
+        assert_eq!(va.w, 440);
+        assert_eq!(va.pw, 3000); // Exactly at boundary - should fail
+
+        let result = translate(&va, &pm);
+
+        // pw (3000) >= segment_size (3000), so error
+        assert_eq!(result, TranslationResult::SegmentBoundaryViolation);
+        assert_eq!(result.to_output(), -1);
+    }
+
+    #[test]
+    fn test_translate_full_simple_test_case() {
+        // Complete test case from spec:
+        // Input: 1575424 1575863 1575864
+        // Output: 4608 5047 -1
+        let pm = setup_simple_test_memory();
+
+        let vas = vec![1575424, 1575863, 1575864];
+        let results = translate_batch(&vas, &pm);
+
+        assert_eq!(results, vec![4608, 5047, -1]);
+    }
+
+    // =========================================================================
+    // Additional translation tests
+    // =========================================================================
+
+    #[test]
+    fn test_translate_invalid_segment() {
+        // Try to access segment that doesn't exist
+        let pm = setup_simple_test_memory();
+
+        // Segment 7 doesn't exist (not initialized)
+        let va = VirtualAddress::from_raw((7 << 18) | (0 << 9) | 0);
+        assert_eq!(va.s, 7);
+
+        let result = translate(&va, &pm);
+        assert_eq!(result, TranslationResult::InvalidSegment);
+    }
+
+    #[test]
+    fn test_translate_invalid_page() {
+        // Access page that doesn't exist within valid segment
+        let pm = setup_simple_test_memory();
+
+        // Page 0 of segment 6 doesn't exist (only page 5 was set up)
+        let va = VirtualAddress::from_raw((6 << 18) | (0 << 9) | 0);
+        assert_eq!(va.s, 6);
+        assert_eq!(va.p, 0);
+
+        let result = translate(&va, &pm);
+        assert_eq!(result, TranslationResult::InvalidPage);
+    }
+
+    #[test]
+    fn test_translate_multiple_segments() {
+        let mut pm = crate::memory::PhysicalMemory::new();
+
+        // Set up two segments
+        pm.set_segment_entry(3, 1024, 5);  // Segment 3: size=1024, PT in frame 5
+        pm.set_segment_entry(7, 2048, 6);  // Segment 7: size=2048, PT in frame 6
+
+        // Set up pages
+        pm.set_page_entry(5, 0, 10);  // Seg 3, page 0 -> frame 10
+        pm.set_page_entry(5, 1, 11);  // Seg 3, page 1 -> frame 11
+        pm.set_page_entry(6, 0, 20);  // Seg 7, page 0 -> frame 20
+
+        // Test segment 3, page 0, offset 100
+        let va1 = VirtualAddress::from_raw((3 << 18) | (0 << 9) | 100);
+        let result1 = translate(&va1, &pm);
+        assert_eq!(result1, TranslationResult::Success(10 * 512 + 100));
+
+        // Test segment 3, page 1, offset 50
+        let va2 = VirtualAddress::from_raw((3 << 18) | (1 << 9) | 50);
+        let result2 = translate(&va2, &pm);
+        assert_eq!(result2, TranslationResult::Success(11 * 512 + 50));
+
+        // Test segment 7, page 0, offset 0
+        let va3 = VirtualAddress::from_raw((7 << 18) | (0 << 9) | 0);
+        let result3 = translate(&va3, &pm);
+        assert_eq!(result3, TranslationResult::Success(20 * 512));
+    }
+
+    #[test]
+    fn test_translate_boundary_edge_cases() {
+        let mut pm = crate::memory::PhysicalMemory::new();
+
+        // Segment with size exactly 512 (one page)
+        pm.set_segment_entry(1, 512, 3);
+        pm.set_page_entry(3, 0, 8);
+
+        // pw = 511 should work (just under 512)
+        let va1 = VirtualAddress::from_raw((1 << 18) | (0 << 9) | 511);
+        assert_eq!(va1.pw, 511);
+        let result1 = translate(&va1, &pm);
+        assert_eq!(result1, TranslationResult::Success(8 * 512 + 511));
+
+        // pw = 512 should fail (at boundary)
+        let va2 = VirtualAddress::from_raw((1 << 18) | (1 << 9) | 0);
+        assert_eq!(va2.pw, 512);
+        let result2 = translate(&va2, &pm);
+        assert_eq!(result2, TranslationResult::SegmentBoundaryViolation);
+    }
+
+    #[test]
+    fn test_translate_batch_empty() {
+        let pm = setup_simple_test_memory();
+        let results = translate_batch(&[], &pm);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_translate_with_init_data() {
+        // Integration test using InitData to set up memory
+        use crate::io::InitData;
+        use crate::memory::{Disk, PhysicalMemory};
+
+        let init_content = "6 3000 4\n6 5 9";
+        let init = InitData::parse(init_content).unwrap();
+
+        let mut pm = PhysicalMemory::new();
+        let mut disk = Disk::new();
+        init.apply(&mut pm, &mut disk);
+
+        // Now translate
+        let vas = vec![1575424, 1575863, 1575864];
+        let results = translate_batch(&vas, &pm);
+
+        assert_eq!(results, vec![4608, 5047, -1]);
     }
 }
