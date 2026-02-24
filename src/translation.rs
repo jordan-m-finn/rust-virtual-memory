@@ -883,4 +883,178 @@ mod tests {
         translate_with_demand_paging(&va4, &mut pm, &disk, &mut ffl);
         assert_eq!(pm.get_page_frame(4, 1), 5); // Page 1 of seg 9 now in frame 5
     }
+
+    // =========================================================================
+    // Additional edge case tests
+    // =========================================================================
+
+    #[test]
+    fn test_translate_zero_va() {
+        // VA = 0 means s=0, p=0, w=0
+        // Segment 0 doesn't exist (not initialized)
+        let pm = crate::memory::PhysicalMemory::new();
+        
+        let va = VirtualAddress::from_raw(0);
+        assert_eq!(va.s, 0);
+        assert_eq!(va.p, 0);
+        assert_eq!(va.w, 0);
+        
+        let result = translate(&va, &pm);
+        assert_eq!(result, TranslationResult::InvalidSegment);
+    }
+
+    #[test]
+    fn test_translate_max_valid_offset() {
+        // Test with maximum valid offset (w = 511)
+        let mut pm = crate::memory::PhysicalMemory::new();
+        
+        // Set up segment 1 with size 1024 (2 pages worth)
+        pm.set_segment_entry(1, 1024, 3);
+        pm.set_page_entry(3, 0, 10);
+        pm.set_page_entry(3, 1, 11);
+        
+        // VA with w = 511 (max offset)
+        let va = VirtualAddress::from_raw((1 << 18) | (0 << 9) | 511);
+        assert_eq!(va.w, 511);
+        
+        let result = translate(&va, &pm);
+        // PA = 10 * 512 + 511 = 5631
+        assert_eq!(result, TranslationResult::Success(5631));
+    }
+
+    #[test]
+    fn test_translate_repeated_same_va() {
+        // Translating the same VA multiple times should give same result
+        let (mut pm, disk, mut ffl) = setup_demand_paging_memory();
+        
+        let va = VirtualAddress::from_raw(2097162);
+        
+        let result1 = translate_with_demand_paging(&va, &mut pm, &disk, &mut ffl);
+        let result2 = translate_with_demand_paging(&va, &mut pm, &disk, &mut ffl);
+        let result3 = translate_with_demand_paging(&va, &mut pm, &disk, &mut ffl);
+        
+        assert_eq!(result1, result2);
+        assert_eq!(result2, result3);
+        assert_eq!(result1, TranslationResult::Success(5130));
+    }
+
+    #[test]
+    fn test_translate_after_page_fault_is_cached() {
+        // After a page fault, the page should be resident and no more faults
+        let (mut pm, disk, mut ffl) = setup_demand_paging_memory();
+        
+        // First translation causes page fault
+        let va = VirtualAddress::from_raw(2097674); // (8, 1, 10)
+        let result1 = translate_with_demand_paging(&va, &mut pm, &disk, &mut ffl);
+        assert_eq!(result1, TranslationResult::Success(1034));
+        
+        // Page should now be resident (positive value)
+        assert!(pm.get_page_frame(3, 1) > 0);
+        
+        // Second translation should work without fault
+        // Same result, and no frames allocated
+        let free_before = ffl.free_count();
+        let result2 = translate_with_demand_paging(&va, &mut pm, &disk, &mut ffl);
+        let free_after = ffl.free_count();
+        
+        assert_eq!(result2, TranslationResult::Success(1034));
+        assert_eq!(free_before, free_after); // No new frame allocated
+    }
+
+    #[test]
+    fn test_segment_size_boundary_exact() {
+        // Test exactly at segment boundary
+        let mut pm = crate::memory::PhysicalMemory::new();
+        
+        // Segment with size 100
+        pm.set_segment_entry(2, 100, 5);
+        pm.set_page_entry(5, 0, 10);
+        
+        // pw = 99 should work (size is 100, so 0-99 valid)
+        let va_valid = VirtualAddress::from_raw((2 << 18) | (0 << 9) | 99);
+        assert_eq!(va_valid.pw, 99);
+        let result = translate(&va_valid, &pm);
+        assert_eq!(result, TranslationResult::Success(10 * 512 + 99));
+        
+        // pw = 100 should fail
+        let va_invalid = VirtualAddress::from_raw((2 << 18) | (0 << 9) | 100);
+        assert_eq!(va_invalid.pw, 100);
+        let result = translate(&va_invalid, &pm);
+        assert_eq!(result, TranslationResult::SegmentBoundaryViolation);
+    }
+
+    #[test]
+    fn test_multiple_segments_independent() {
+        // Changes to one segment shouldn't affect another
+        let mut pm = crate::memory::PhysicalMemory::new();
+        let mut disk = crate::memory::Disk::new();
+        let mut ffl = crate::memory::FreeFrameList::new();
+        
+        // Set up two independent segments
+        pm.set_segment_entry(1, 1024, 3);
+        pm.set_page_entry(3, 0, 10);
+        
+        pm.set_segment_entry(2, 2048, -5); // PT on disk
+        disk.write(5, 0, 20);
+        
+        ffl.mark_occupied(3);
+        ffl.mark_occupied(10);
+        ffl.mark_occupied(20);
+        
+        // Translate in segment 1 (resident)
+        let va1 = VirtualAddress::from_raw((1 << 18) | (0 << 9) | 100);
+        let result1 = translate_with_demand_paging(&va1, &mut pm, &disk, &mut ffl);
+        assert_eq!(result1, TranslationResult::Success(10 * 512 + 100));
+        
+        // Segment 2's PT should still be on disk
+        assert!(pm.get_segment_pt_location(2) < 0);
+        
+        // Translate in segment 2 (causes PT fault)
+        let va2 = VirtualAddress::from_raw((2 << 18) | (0 << 9) | 50);
+        let result2 = translate_with_demand_paging(&va2, &mut pm, &disk, &mut ffl);
+        assert_eq!(result2, TranslationResult::Success(20 * 512 + 50));
+        
+        // Segment 1 should be unaffected
+        let result1_again = translate_with_demand_paging(&va1, &mut pm, &disk, &mut ffl);
+        assert_eq!(result1_again, TranslationResult::Success(10 * 512 + 100));
+    }
+
+    #[test]
+    fn test_large_batch_translation() {
+        // Test translating many VAs at once
+        let (mut pm, disk, mut ffl) = setup_demand_paging_memory();
+        
+        // Create a batch with repeated VAs
+        let vas: Vec<u32> = (0..100)
+            .map(|i| {
+                match i % 4 {
+                    0 => 2097162,
+                    1 => 2097674,
+                    2 => 2359306,
+                    _ => 2359818,
+                }
+            })
+            .collect();
+        
+        let results = translate_batch_with_demand_paging(&vas, &mut pm, &disk, &mut ffl);
+        
+        assert_eq!(results.len(), 100);
+        
+        // First 4 should establish the pattern
+        assert_eq!(results[0], 5130);
+        assert_eq!(results[1], 1034);
+        assert_eq!(results[2], 6666);
+        assert_eq!(results[3], 2570);
+        
+        // Subsequent ones should have same results (pages now resident)
+        for i in 4..100 {
+            let expected = match i % 4 {
+                0 => 5130,
+                1 => 1034,
+                2 => 6666,
+                _ => 2570,
+            };
+            assert_eq!(results[i], expected, "Mismatch at index {}", i);
+        }
+    }
 }
