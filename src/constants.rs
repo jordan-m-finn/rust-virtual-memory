@@ -1,10 +1,45 @@
-// size of the physical memory ~words (ints)
-pub const PM_SIZE: usize = 524_288;
-pub const FRAME_SIZE: usize = 512;
-pub const NUM_FRAMES: usize = 1024;
-pub const DISK_BLOCKS: usize = 1024;
+// =============================================================================
+// Bit Widths
+// =============================================================================
+pub const S_BITS: u32 = 9;
+pub const P_BITS: u32 = 9;
+pub const W_BITS: u32 = 9;
 
-// bitmasks (u32 since bitwise operations 32-bit virtual addys are needed and mixing usize w/ u32
-// causes errors
-pub const MASK_9_BITS: u32 = 0x1FF;
-pub const MASK_18_BITS: u32 = 0x3FFFF;
+// =============================================================================
+// Sizes (derived from bit widths)
+// =============================================================================
+pub const PAGE_SIZE: usize = 1 << W_BITS; // 512
+pub const PT_SIZE: usize = 1 << P_BITS; // 512
+pub const MAX_SEGMENTS: usize = 1 << S_BITS; // 512
+pub const ST_SIZE: usize = MAX_SEGMENTS * 2; // 1024
+
+// =============================================================================
+// Physical Memory Configuration
+// =============================================================================
+pub const NUM_FRAMES: usize = 1024;
+pub const PM_SIZE: usize = NUM_FRAMES * PAGE_SIZE; // 524,288
+pub const ST_FRAMES: usize = 2;
+
+// =============================================================================
+// Disk Configuration (for demand paging)
+// =============================================================================
+pub const DISK_BLOCKS: usize = 1024;
+pub const BLOCK_SIZE: usize = PAGE_SIZE; // 512
+
+// =============================================================================
+// Bit Masks for VA Decomposition
+// =============================================================================
+pub const W_MASK: u32 = (1 << W_BITS) - 1; // 0x1FF = 511
+pub const P_MASK: u32 = (1 << P_BITS) - 1; // 0x1FF = 511
+pub const PW_MASK: u32 = (1 << (P_BITS + W_BITS)) - 1; // 0x3FFFF = 262143
+
+// =============================================================================
+// Shift Amounts
+// =============================================================================
+pub const P_SHIFT: u32 = W_BITS; // 9
+pub const S_SHIFT: u32 = P_BITS + W_BITS; // 18
+
+// =============================================================================
+// Error Values
+// =============================================================================
+pub const INVALID_ADDRESS: i32 = -1;
