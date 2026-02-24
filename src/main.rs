@@ -1,6 +1,10 @@
 use std::env;
 use std::process;
 
+use vm_manager::io::{read_virtual_addresses, write_results, InitData};
+use vm_manager::memory::{Disk, PhysicalMemory};
+use vm_manager::translation::{translate_batch};
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -20,17 +24,31 @@ fn main() {
     let input_file = &args[2];
     let output_file = &args[3];
 
-    println!("VM Manager Starting...");
-    println!("  Init file:   {}", init_file);
-    println!("  Input file:  {}", input_file);
-    println!("  Output file: {}", output_file);
+    // Run the VM manager and handle any errors
+    if let Err(e) = run(init_file, input_file, output_file) {
+        eprintln!("Error: {}", e);
+        process::exit(1);
+    }
+}
 
-    // TODO: Wire everything together
-    // 1. Initialize PM from init_file
-    // 2. Read VAs from input_file
-    // 3. Translate each VA to PA
-    // 4. Write results to output_file
+/// Main logic separated from main() for cleaner error handling
+fn run(init_file: &str, input_file: &str, output_file: &str) -> Result<(), String> {
+    // Step 1: Parse initialization file
+    let init_data = InitData::from_file(init_file)?;
 
-    println!();
-    println!("Not yet implemented - see subsequent commits!");
+    // Step 2: Initialize physical memory and disk
+    let mut pm = PhysicalMemory::new();
+    let mut disk = Disk::new();
+    init_data.apply(&mut pm, &mut disk);
+
+    // Step 3: Read virtual addresses
+    let vas = read_virtual_addresses(input_file)?;
+
+    // Step 4: Translate each VA to PA
+    let results = translate_batch(&vas, &pm);
+
+    // Step 5: Write results to output file
+    write_results(output_file, &results)?;
+
+    Ok(())
 }
