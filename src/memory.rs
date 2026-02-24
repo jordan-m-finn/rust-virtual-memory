@@ -1,6 +1,8 @@
 use crate::constants::*;
 
+/// Physical Memory - simulates the main memory hardware
 pub struct PhysicalMemory {
+    /// The actual memory array - using Box because 524K × 4 bytes = 2MB is too large for stack
     data: Box<[i32; PM_SIZE]>,
 }
 
@@ -128,8 +130,51 @@ impl Default for Disk {
 
 /// Tracks which frames are available for allocation
 pub struct FreeFrameList {
-    // TODO: implement free frame tracking
-    _placeholder: (),
+    /// Stack of free frame numbers (LIFO allocation)
+    free_frames: Vec<u32>,
+}
+
+impl FreeFrameList {
+    /// Create a new free frame list with all frames (2-1023) initially free
+    pub fn new() -> Self {
+        // Start with frames 2 through NUM_FRAMES-1 as free
+        let free_frames: Vec<u32> = (ST_FRAMES as u32..NUM_FRAMES as u32).rev().collect();
+
+        FreeFrameList { free_frames }
+    }
+
+    /// Mark a frame as occupied (not available for allocation)
+    pub fn mark_occupied(&mut self, frame: u32) {
+        if let Some(pos) = self.free_frames.iter().position(|&f| f == frame) {
+            self.free_frames.remove(pos);
+        }
+    }
+
+    /// Allocate a free frame
+    pub fn allocate(&mut self) -> Option<u32> {
+        self.free_frames.pop()
+    }
+
+    /// Check how many frames are currently free
+    pub fn free_count(&self) -> usize {
+        self.free_frames.len()
+    }
+
+    /// Check if a specific frame is free
+    pub fn is_free(&self, frame: u32) -> bool {
+        self.free_frames.contains(&frame)
+    }
+
+    /// Get the next frame that would be allocated (without allocating it)
+    pub fn peek_next(&self) -> Option<u32> {
+        self.free_frames.last().copied()
+    }
+}
+
+impl Default for FreeFrameList {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -255,5 +300,153 @@ mod tests {
         assert_eq!(pm.get_segment_pt_location(9), -7); // On disk!
         assert_eq!(disk.read(7, 0), 13);
         assert_eq!(disk.read(7, 1), -25);
+    }
+
+    // =========================================================================
+    // FreeFrameList tests
+    // =========================================================================
+
+    #[test]
+    fn test_free_frame_list_initialization() {
+        let ffl = FreeFrameList::new();
+
+        // Should have NUM_FRAMES - ST_FRAMES free frames (1024 - 2 = 1022)
+        assert_eq!(ffl.free_count(), NUM_FRAMES - ST_FRAMES);
+
+        // Frames 0 and 1 should NOT be free (reserved for ST)
+        assert!(!ffl.is_free(0));
+        assert!(!ffl.is_free(1));
+
+        // Frame 2 should be free (first available)
+        assert!(ffl.is_free(2));
+
+        // Frame 1023 should be free (last frame)
+        assert!(ffl.is_free(1023));
+    }
+
+    #[test]
+    fn test_free_frame_list_allocate() {
+        let mut ffl = FreeFrameList::new();
+        let initial_count = ffl.free_count();
+
+        // Allocate a frame
+        let frame = ffl.allocate();
+        assert!(frame.is_some());
+
+        // Count should decrease
+        assert_eq!(ffl.free_count(), initial_count - 1);
+
+        // Allocated frame should no longer be free
+        let allocated = frame.unwrap();
+        assert!(!ffl.is_free(allocated));
+    }
+
+    #[test]
+    fn test_free_frame_list_allocate_order() {
+        let mut ffl = FreeFrameList::new();
+
+        // Should allocate low-numbered frames first
+        let f1 = ffl.allocate().unwrap();
+        let f2 = ffl.allocate().unwrap();
+        let f3 = ffl.allocate().unwrap();
+
+        // First three free frames are 2, 3, 4
+        assert_eq!(f1, 2);
+        assert_eq!(f2, 3);
+        assert_eq!(f3, 4);
+    }
+
+    #[test]
+    fn test_free_frame_list_mark_occupied() {
+        let mut ffl = FreeFrameList::new();
+
+        // Mark frames 3, 10, 13 as occupied (from the spec example)
+        ffl.mark_occupied(3);
+        ffl.mark_occupied(10);
+        ffl.mark_occupied(13);
+
+        // These frames should no longer be free
+        assert!(!ffl.is_free(3));
+        assert!(!ffl.is_free(10));
+        assert!(!ffl.is_free(13));
+
+        // Count should decrease by 3
+        assert_eq!(ffl.free_count(), NUM_FRAMES - ST_FRAMES - 3);
+    }
+
+    #[test]
+    fn test_free_frame_list_allocate_after_mark_occupied() {
+        let mut ffl = FreeFrameList::new();
+
+        // From spec example: frames 0, 1, 3, 10, 13 are occupied
+        // (0, 1 are ST, so we just mark 3, 10, 13)
+        ffl.mark_occupied(3);
+        ffl.mark_occupied(10);
+        ffl.mark_occupied(13);
+
+        // Next allocation should be frame 2 (first free)
+        assert_eq!(ffl.allocate(), Some(2));
+
+        // Then frame 4 (3 is occupied)
+        assert_eq!(ffl.allocate(), Some(4));
+
+        // Then frame 5
+        assert_eq!(ffl.allocate(), Some(5));
+    }
+
+    #[test]
+    fn test_free_frame_list_spec_example() {
+        // From spec: "frames 0, 1, 3, 10, 13 are occupied"
+        // "The following VA translations use the free frames 2, 4, 5"
+        let mut ffl = FreeFrameList::new();
+
+        // Mark frames as occupied per spec
+        ffl.mark_occupied(3);
+        ffl.mark_occupied(10);
+        ffl.mark_occupied(13);
+
+        // Allocations should give us 2, 4, 5 in order
+        assert_eq!(ffl.allocate(), Some(2));
+        assert_eq!(ffl.allocate(), Some(4));
+        assert_eq!(ffl.allocate(), Some(5));
+    }
+
+    #[test]
+    fn test_free_frame_list_peek_next() {
+        let mut ffl = FreeFrameList::new();
+
+        // Peek should return 2 (first free frame)
+        assert_eq!(ffl.peek_next(), Some(2));
+
+        // Peek doesn't consume
+        assert_eq!(ffl.peek_next(), Some(2));
+
+        // After allocation, peek returns next
+        ffl.allocate();
+        assert_eq!(ffl.peek_next(), Some(3));
+    }
+
+    #[test]
+    fn test_free_frame_list_mark_occupied_idempotent() {
+        let mut ffl = FreeFrameList::new();
+        let initial_count = ffl.free_count();
+
+        // Marking same frame twice should only remove it once
+        ffl.mark_occupied(5);
+        ffl.mark_occupied(5);
+
+        assert_eq!(ffl.free_count(), initial_count - 1);
+    }
+
+    #[test]
+    fn test_free_frame_list_mark_st_frames() {
+        let mut ffl = FreeFrameList::new();
+        let initial_count = ffl.free_count();
+
+        // Marking ST frames (0, 1) should have no effect - they were never free
+        ffl.mark_occupied(0);
+        ffl.mark_occupied(1);
+
+        assert_eq!(ffl.free_count(), initial_count);
     }
 }
