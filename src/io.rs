@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::constants::*;
-use crate::memory::{Disk, PhysicalMemory};
+use crate::memory::{Disk, FreeFrameList, PhysicalMemory};
 
 /// Parsed contents of the initialization file
 #[derive(Debug, Default)]
@@ -125,26 +125,37 @@ impl InitData {
     }
 
     /// Apply the parsed initialization data to physical memory
-    pub fn apply(&self, pm: &mut PhysicalMemory, disk: &mut Disk) {
+    pub fn apply(&self, pm: &mut PhysicalMemory, disk: &mut Disk) -> FreeFrameList {
+        let mut ffl = FreeFrameList::new();
+
         // Step 1: Initialize ST entries
         for &(segment, size, pt_location) in &self.st_entries {
             pm.set_segment_entry(segment, size, pt_location);
+
+            // If PT is resident (positive frame number), mark that frame as occupied
+            if pt_location > 0 {
+                ffl.mark_occupied(pt_location as u32);
+            }
         }
 
         // Step 2: Initialize PT entries
-        // We need to check if the PT is resident (positive) or on disk (negative)
         for &(segment, page, frame_location) in &self.pt_entries {
             let pt_location = pm.get_segment_pt_location(segment);
 
             if pt_location >= 0 {
-                // PT is resident in memory - write directly to PM
                 pm.set_page_entry(pt_location, page, frame_location);
             } else {
-                // PT is on disk - write to the disk block
                 let block = (-pt_location) as usize;
                 disk.write(block, page as usize, frame_location);
             }
+
+            // If page is resident (positive frame number), mark that frame as occupied
+            if frame_location > 0 {
+                ffl.mark_occupied(frame_location as u32);
+            }
         }
+        
+        ffl  // Return the FreeFrameList!
     }
 }
 

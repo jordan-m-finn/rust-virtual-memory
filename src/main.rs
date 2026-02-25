@@ -14,9 +14,9 @@
 use std::env;
 use std::process;
 
-use vm_manager::io::{read_virtual_addresses, write_results, InitData};
-use vm_manager::memory::{Disk, FreeFrameList, PhysicalMemory};
-use vm_manager::translation::{
+use rust_virtual_memory::io::{read_virtual_addresses, write_results, InitData};
+use rust_virtual_memory::memory::{Disk, FreeFrameList, PhysicalMemory};
+use rust_virtual_memory::translation::{
     translate, translate_batch, translate_with_demand_paging,
     translate_batch_with_demand_paging, VirtualAddress, TranslationResult,
 };
