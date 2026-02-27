@@ -1,10 +1,4 @@
 [package]
 name = "rust-virtual-memory"
 version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-
-[[bin]]
-name = "rust-virtual-memory"
-path = "main.rs"
+edition = "2021"
